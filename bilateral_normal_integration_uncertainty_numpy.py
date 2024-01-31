@@ -200,9 +200,9 @@ def bilateral_normal_integration_uncertainty(normal_map,
     if depth_map is not None:
         assert normal_confidence is not None or depth_confidence is not None, "depth_mask and depth_confidence cannot be both None."
         if depth_confidence is None:
-            depth_confidence = 0.5*np.ones_like(depth_map)
+            depth_confidence = 0.5*np.ones_like(depth_map, float)
         if normal_confidence is None:
-            normal_confidence = 0.5*np.ones_like(depth_map)
+            normal_confidence = 0.5*np.ones_like(depth_map, float)
         depth_conf_ratio = depth_confidence / normal_confidence
         
         optim_weight = depth_conf_ratio[normal_mask]
