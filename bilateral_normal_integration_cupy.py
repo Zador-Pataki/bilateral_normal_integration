@@ -215,7 +215,6 @@ def bilateral_normal_integration(normal_map,
     #      [0,  0,  1]]
     # I forgot why I chose the awkward coordinate system after getting used to opencv convention :(
     # but I won't touch the working code.
-    
     normal_map = cp.asarray(normal_map)
     normal_mask = cp.asarray(normal_mask)
     if depth_map is not None:
@@ -365,6 +364,7 @@ def bilateral_normal_integration(normal_map,
         if depth_map is not None:
             b_vec += lambda1 * z_prior
             offset = cp.mean((z_prior - z)[depth_mask_flat])
+
             z = z + offset
 
         z, _ = cg(A_mat, b_vec, x0=z, M=D, maxiter=cg_max_iter, tol=cg_tol)
@@ -419,33 +419,34 @@ def bilateral_normal_integration(normal_map,
     
     return depth_map, surface, wu_map, wv_map, energy_list
 
-def bilateral_normal_integration_uncertainty(normal_map,
-                                 normal_mask, normal_confidence=None,
+def bilateral_normal_integration_uncertainty_test(normal_map,
+                                 normal_mask, normals_confidence=None,
                                  k=2,
                                  lambda1=0,
                                  depth_map=None,
                                  depth_mask=None,
                                  depth_confidence=None,
+                                 depth_init=None,
                                  K=None,
                                  step_size=1,
                                  max_iter=150,
                                  tol=1e-4,
                                  cg_max_iter=5000,
-                                 cg_tol=1e-3):
-    
+                                 cg_tol=1e-3,
+                                 verbose=2):
     normal_map = cp.asarray(normal_map)
     normal_mask = cp.asarray(normal_mask)
     if depth_map is not None:
         depth_map = cp.asarray(depth_map)
         depth_mask = cp.asarray(depth_mask)
-    if normal_confidence is not None:
-        normal_confidence = cp.asarray(normal_confidence)
+    if normals_confidence is not None:
+        normals_confidence = cp.asarray(normals_confidence)
     if depth_confidence is not None:
         depth_confidence = cp.asarray(depth_confidence)
 
     num_normals = cp.sum(normal_mask).item()
     projection = "orthographic" if K is None else "perspective"
-    print(f"Running bilateral normal integration with k={k} in the {projection} case. \n"
+    if verbose >1: print(f"Running bilateral normal integration with k={k} in the {projection} case. \n"
           f"The number of normal vectors is {num_normals}.")
     # transfer the normal map from the normal coordinates to the camera coordinates
     nx = normal_map[normal_mask, 1]
@@ -517,284 +518,56 @@ def bilateral_normal_integration_uncertainty(normal_map,
     pixel_idx_bottom_center_indptr = cp.concatenate([cp.array([0]), cp.cumsum(has_bottom_mask_flat)])
 
     # initialization
-    wu = 0.5 * cp.ones(num_normals, float)
-    wv = 0.5 * cp.ones(num_normals, float)
-    z = cp.zeros(num_normals, float)
-    energy = cp.sum(wu * (A1.dot(z) + nx) ** 2) + \
-             cp.sum((1 - wu) * (A2.dot(z) + nx) ** 2) + \
-             cp.sum(wv * (A3.dot(z) + ny) ** 2) + \
-             cp.sum((1 - wv) * (A4.dot(z) + ny) ** 2)
-    energy_list = []
-
-    tic = time.time()
-
-    energy_list = []
-
-    if depth_map is not None:
-        if depth_confidence is None:
-            depth_confidence = 0.5*cp.ones_like(depth_map, float)
-        if normal_confidence is None:
-            normal_confidence = 0.5*cp.ones_like(depth_map, float)
-        depth_conf_ratio = depth_confidence / normal_confidence
-        depth_conf_ratio =depth_conf_ratio[normal_mask]
-        
-        depth_mask_flat = depth_mask[normal_mask].astype(bool)  # shape: (num_normals,)
-        z_prior = cp.log(depth_map)[normal_mask] if K is not None else depth_map[normal_mask]  # shape: (num_normals,)
-        z_prior[~depth_mask_flat] = 0
-        
-        # print(depth_conf_ratio.dtype)
-        M = csr_matrix((depth_conf_ratio, pixel_idx_flat, pixel_idx_flat_indptr),
-                          shape=(num_normals, num_normals))
-      
-
-    pbar = tqdm(range(max_iter))
-
-    for i in pbar:
-        ################################################################################################################
-        # I am manually computing A_mat = A.T @ W @ A here. It saves 2/3 time compared to the simpliest way A.T @ W @ A.
-        # A.T @ W @ A can take more time than you think when the normal map become larger.
-        # The diaganol matrix W=diag([wu, 1-wu, wv, 1-wv]) needs not be explicited defined in this case.
-        # 
-        data_term_top = wu[has_top_mask_flat] * nz_top_square
-        data_term_bottom = (1 - wu[has_bottom_mask_flat]) * nz_bottom_square
-        data_term_left = (1 - wv[has_left_mask_flat]) * nz_left_square
-        data_term_right = wv[has_right_mask_flat] * nz_right_square
-
-        diagonal_data_term = cp.zeros(num_normals)
-        diagonal_data_term[has_left_mask_flat] += data_term_left
-        diagonal_data_term[has_left_mask_left_flat] += data_term_left
-        diagonal_data_term[has_right_mask_flat] += data_term_right
-        diagonal_data_term[has_right_mask_right_flat] += data_term_right
-        diagonal_data_term[has_top_mask_flat] += data_term_top
-        diagonal_data_term[has_top_mask_top_flat] += data_term_top
-        diagonal_data_term[has_bottom_mask_flat] += data_term_bottom
-        diagonal_data_term[has_bottom_mask_bottom_flat] += data_term_bottom
-        # if depth_map is not None:
-        #     diagonal_data_term[depth_mask_flat] += lambda1 * depth_conf_ratio[depth_mask_flat]
-
-        A_mat_d = csr_matrix((diagonal_data_term, pixel_idx_flat, pixel_idx_flat_indptr),
-                             shape=(num_normals, num_normals))
-
-        A_mat_left_odu = csr_matrix((-data_term_left, pixel_idx_left_center, pixel_idx_left_left_indptr),
-                                    shape=(num_normals, num_normals))
-        A_mat_right_odu = csr_matrix((-data_term_right, pixel_idx_right_right, pixel_idx_right_center_indptr),
-                                     shape=(num_normals, num_normals))
-        A_mat_top_odu = csr_matrix((-data_term_top, pixel_idx_top_center, pixel_idx_top_top_indptr),
-                                   shape=(num_normals, num_normals))
-        A_mat_bottom_odu = csr_matrix((-data_term_bottom, pixel_idx_bottom_bottom, pixel_idx_bottom_center_indptr),
-                                      shape=(num_normals, num_normals))
-
-        A_mat_odu = A_mat_top_odu + A_mat_bottom_odu + A_mat_right_odu + A_mat_left_odu
-        A_mat = A_mat_d + A_mat_odu + A_mat_odu.T  # diagnol + upper triangle + lower triangle matrix
-        ################################################################################################################
-
-        b_vec = A1.T @ (wu * (-nx)) \
-                + A2.T @ ((1 - wu) * (-nx)) \
-                + A3.T @ (wv * (-ny)) \
-                + A4.T @ ((1 - wv) * (-ny))
-
-        if depth_map is not None:
-            
-            depth_diff = M@((z_prior - z)[depth_mask_flat])
-            depth_diff[depth_diff==0] = cp.nan  #FIXME: for some reason this introduces difference between gpu based
-            offset = cp.nanmean(depth_diff)
-            z = z + offset
-            A_mat += lambda1 * M
-            A_mat = A_mat.T # Change back
-            b_vec += lambda1 * M @ z_prior
-            
-        D = csr_matrix((1 / cp.clip(A_mat.diagonal(), 1e-5, None), pixel_idx_flat, pixel_idx_flat_indptr),
-                       shape=(num_normals, num_normals))  # Jacobi preconditioner.
-       
-        z, _ = cg(A_mat, b_vec, x0=z, M=D, maxiter=cg_max_iter, tol=cg_tol)
- 
-
-        del A_mat, b_vec, wu, wv
-
-        # Update weights
+    if depth_init is None:
+        z = cp.zeros(num_normals, float)
+        wu = 0.5 * cp.ones(num_normals, float)
+        wv = 0.5 * cp.ones(num_normals, float)
+    else:
+        z = cp.log(cp.asarray(depth_init)[normal_mask])
         wu = sigmoid((A2.dot(z)) ** 2 - (A1.dot(z)) ** 2, k)  # top
         wv = sigmoid((A4.dot(z)) ** 2 - (A3.dot(z)) ** 2, k)  # right
-
-        # Check for convergence
-        energy_old = energy
-        energy = cp.sum(wu * (A1.dot(z) + nx) ** 2) + \
-                 cp.sum((1 - wu) * (A2.dot(z) + nx) ** 2) + \
-                 cp.sum(wv * (A3.dot(z) + ny) ** 2) + \
-                 cp.sum((1 - wv) * (A4.dot(z) + ny) ** 2)
-
-        energy_list.append(energy)
-        relative_energy = cp.abs(energy - energy_old) / energy_old
-        pbar.set_description(
-            f"step {i + 1}/{max_iter} energy: {energy:.3e}"
-            f" relative energy: {relative_energy:.3e}")
-        if relative_energy < tol:
-            break
-    del A1, A2, A3, A4, nx, ny
-    toc = time.time()
-
-    print(f"Total time: {toc - tic:.3f} sec")
-    depth_map = cp.ones_like(normal_mask, float) * cp.nan
-    depth_map[normal_mask] = z
-
-    if K is not None:  # perspective
-        depth_map = cp.exp(depth_map)
-        vertices = cp.asnumpy(map_depth_map_to_point_clouds(depth_map, normal_mask, K=K))
-    else:  # orthographic
-        vertices = cp.asnumpy(map_depth_map_to_point_clouds(depth_map, normal_mask, K=None, step_size=step_size))
-
-    facets = cp.asnumpy(construct_facets_from(normal_mask))
-    if nz.mean() > 0:
-        facets = facets[:, [0, 1, 4, 3, 2]]
-    surface = pv.PolyData(vertices, facets)
-
-    # In the main paper, wu indicates the horizontal direction; wv indicates the vertical direction
-    wu_map = cp.ones_like(normal_mask) * cp.nan
-    wu_map[normal_mask] = wv
-
-    wv_map = cp.ones_like(normal_mask) * cp.nan
-    wv_map[normal_mask] = wu
     
-    depth_map = cp.asnumpy(depth_map)
-    wu_map = cp.asnumpy(wu_map)
-    wv_map = cp.asnumpy(wv_map)
     
-    return depth_map, surface, wu_map, wv_map, energy_list
-
-def bilateral_normal_integration_uncertainty_legacy(normal_map,
-                                 normal_mask, normal_confidence=None,
-                                 k=2,
-                                 lambda1=0,
-                                 depth_map=None,
-                                 depth_mask=None,
-                                 depth_confidence=None,
-                                 K=None,
-                                 step_size=1,
-                                 max_iter=150,
-                                 tol=1e-4,
-                                 cg_max_iter=5000,
-                                 cg_tol=1e-3):
-    
-    normal_map = cp.asarray(normal_map)
-    normal_mask = cp.asarray(normal_mask)
-    if depth_map is not None:
-        depth_map = cp.asarray(depth_map)
-        depth_mask = cp.asarray(depth_mask)
-    if normal_confidence is not None:
-        normal_confidence = cp.asarray(normal_confidence)
-    if depth_confidence is not None:
-        depth_confidence = cp.asarray(depth_confidence)
-
-    num_normals = cp.sum(normal_mask).item()
-    projection = "orthographic" if K is None else "perspective"
-    print(f"Running bilateral normal integration with k={k} in the {projection} case. \n"
-          f"The number of normal vectors is {num_normals}.")
-    # transfer the normal map from the normal coordinates to the camera coordinates
-    nx = normal_map[normal_mask, 1]
-    ny = normal_map[normal_mask, 0]
-    nz = - normal_map[normal_mask, 2]
-    del normal_map
-
-    if K is not None:  # perspective
-        H, W = normal_mask.shape
-
-        yy, xx = cp.meshgrid(cp.arange(W), cp.arange(H))
-        xx = cp.flip(xx, axis=0)
-
-        cx = K[0, 2]
-        cy = K[1, 2]
-        fx = K[0, 0]
-        fy = K[1, 1]
-
-        uu = xx[normal_mask] - cx
-        vv = yy[normal_mask] - cy
-
-        nz_u = uu * nx + vv * ny + fx * nz
-        nz_v = uu * nx + vv * ny + fy * nz
-        del xx, yy, uu, vv
-    else:  # orthographic
-        nz_u = nz.copy()
-        nz_v = nz.copy()
-
-    # right, left, top, bottom
-    A3, A4, A1, A2 = generate_dx_dy(normal_mask, nz_horizontal=nz_v, nz_vertical=nz_u, step_size=step_size)
-
-    pixel_idx = cp.zeros_like(normal_mask, dtype=int)
-    pixel_idx[normal_mask] = cp.arange(num_normals)
-    pixel_idx_flat = cp.arange(num_normals)
-    pixel_idx_flat_indptr = cp.arange(num_normals + 1)
-
-    has_left_mask = cp.logical_and(move_right(normal_mask), normal_mask)
-    has_left_mask_left = move_left(has_left_mask)
-    has_right_mask = cp.logical_and(move_left(normal_mask), normal_mask)
-    has_right_mask_right = move_right(has_right_mask)
-    has_bottom_mask = cp.logical_and(move_top(normal_mask), normal_mask)
-    has_bottom_mask_bottom = move_bottom(has_bottom_mask)
-    has_top_mask = cp.logical_and(move_bottom(normal_mask), normal_mask)
-    has_top_mask_top = move_top(has_top_mask)
-
-    has_left_mask_flat = has_left_mask[normal_mask]
-    has_right_mask_flat = has_right_mask[normal_mask]
-    has_bottom_mask_flat = has_bottom_mask[normal_mask]
-    has_top_mask_flat = has_top_mask[normal_mask]
-
-    has_left_mask_left_flat = has_left_mask_left[normal_mask]
-    has_right_mask_right_flat = has_right_mask_right[normal_mask]
-    has_bottom_mask_bottom_flat = has_bottom_mask_bottom[normal_mask]
-    has_top_mask_top_flat = has_top_mask_top[normal_mask]
-
-    nz_left_square = nz_v[has_left_mask_flat] ** 2
-    nz_right_square = nz_v[has_right_mask_flat] ** 2
-    nz_top_square = nz_u[has_top_mask_flat] ** 2
-    nz_bottom_square = nz_u[has_bottom_mask_flat] ** 2
-
-    pixel_idx_left_center = pixel_idx[has_left_mask]
-    pixel_idx_right_right = pixel_idx[has_right_mask_right]
-    pixel_idx_top_center = pixel_idx[has_top_mask]
-    pixel_idx_bottom_bottom = pixel_idx[has_bottom_mask_bottom]
-
-    pixel_idx_left_left_indptr = cp.concatenate([cp.array([0]), cp.cumsum(has_left_mask_left_flat)])
-    pixel_idx_right_center_indptr = cp.concatenate([cp.array([0]), cp.cumsum(has_right_mask_flat)])
-    pixel_idx_top_top_indptr = cp.concatenate([cp.array([0]), cp.cumsum(has_top_mask_top_flat)])
-    pixel_idx_bottom_center_indptr = cp.concatenate([cp.array([0]), cp.cumsum(has_bottom_mask_flat)])
-
-    # initialization
-    wu = 0.5 * cp.ones(num_normals, float)
-    wv = 0.5 * cp.ones(num_normals, float)
-    z = cp.zeros(num_normals, float)
-    energy = cp.sum(wu * (A1.dot(z) + nx) ** 2) + \
-             cp.sum((1 - wu) * (A2.dot(z) + nx) ** 2) + \
-             cp.sum(wv * (A3.dot(z) + ny) ** 2) + \
-             cp.sum((1 - wv) * (A4.dot(z) + ny) ** 2)
-    energy_list = []
-
     tic = time.time()
-
-    energy_list = []
+    
+    if normals_confidence is None:
+        normals_confidence = 0.5*cp.ones_like(normal_mask, float)
+    normals_confidence = normals_confidence[normal_mask]
 
     if depth_map is not None:
         if depth_confidence is None:
             depth_confidence = 0.5*cp.ones_like(depth_mask, float)
-        if normal_confidence is None:
-            normal_confidence = 0.5*cp.ones_like(normal_mask, float)
-        depth_conf_ratio = depth_confidence / normal_confidence
-        depth_conf_ratio =depth_conf_ratio[normal_mask]
+        
+        depth_confidence =depth_confidence[normal_mask]
         
         depth_mask_flat = depth_mask[normal_mask].astype(bool)  # shape: (num_normals,)
         z_prior = cp.log(depth_map)[normal_mask] if K is not None else depth_map[normal_mask]  # shape: (num_normals,)
         z_prior[~depth_mask_flat] = 0
+        
+        
+    wu_plus = wu*normals_confidence
+    wu_minus = (1-wu)*normals_confidence
+    wv_plus = wv*normals_confidence
+    wv_minus = (1-wv)*normals_confidence
+    energy = cp.sum(wu_plus * (A1.dot(z) + nx) ** 2) + \
+             cp.sum(wu_minus * (A2.dot(z) + nx) ** 2) + \
+             cp.sum(wv_plus * (A3.dot(z) + ny) ** 2) + \
+             cp.sum(wv_minus * (A4.dot(z) + ny) ** 2)
+    energy_list = [energy]
 
-    pbar = tqdm(range(max_iter))
+   
 
+    pbar = tqdm(range(max_iter)) if verbose >1 else range(max_iter)
     for i in pbar:
         ################################################################################################################
         # I am manually computing A_mat = A.T @ W @ A here. It saves 2/3 time compared to the simpliest way A.T @ W @ A.
         # A.T @ W @ A can take more time than you think when the normal map become larger.
         # The diaganol matrix W=diag([wu, 1-wu, wv, 1-wv]) needs not be explicited defined in this case.
         # 
-        data_term_top = wu[has_top_mask_flat] * nz_top_square
-        data_term_bottom = (1 - wu[has_bottom_mask_flat]) * nz_bottom_square
-        data_term_left = (1 - wv[has_left_mask_flat]) * nz_left_square
-        data_term_right = wv[has_right_mask_flat] * nz_right_square
+        data_term_top = wu_plus[has_top_mask_flat] * nz_top_square
+        data_term_bottom = wu_minus[has_bottom_mask_flat] * nz_bottom_square
+        data_term_left = wv_plus[has_left_mask_flat] * nz_left_square
+        data_term_right = wv_minus[has_right_mask_flat] * nz_right_square
 
         diagonal_data_term = cp.zeros(num_normals)
         diagonal_data_term[has_left_mask_flat] += data_term_left
@@ -806,7 +579,7 @@ def bilateral_normal_integration_uncertainty_legacy(normal_map,
         diagonal_data_term[has_bottom_mask_flat] += data_term_bottom
         diagonal_data_term[has_bottom_mask_bottom_flat] += data_term_bottom
         if depth_map is not None:
-            diagonal_data_term[depth_mask_flat] += lambda1 * depth_conf_ratio[depth_mask_flat]
+            diagonal_data_term[depth_mask_flat] += lambda1 * depth_confidence[depth_mask_flat]
 
         A_mat_d = csr_matrix((diagonal_data_term, pixel_idx_flat, pixel_idx_flat_indptr),
                              shape=(num_normals, num_normals))
@@ -824,44 +597,56 @@ def bilateral_normal_integration_uncertainty_legacy(normal_map,
         A_mat = A_mat_d + A_mat_odu + A_mat_odu.T  # diagnol + upper triangle + lower triangle matrix
         ################################################################################################################
 
-        b_vec = A1.T @ (wu * (-nx)) \
-                + A2.T @ ((1 - wu) * (-nx)) \
-                + A3.T @ (wv * (-ny)) \
-                + A4.T @ ((1 - wv) * (-ny))
+        b_vec = A1.T @ (wu_plus * (-nx)) \
+                + A2.T @ (wu_minus * (-nx)) \
+                + A3.T @ (wv_plus * (-ny)) \
+                + A4.T @ (wv_minus * (-ny))
 
         if depth_map is not None:
-            b_vec += lambda1 * depth_conf_ratio[depth_mask_flat] * z_prior
-            depth_diff = depth_conf_ratio[depth_mask_flat]*(z_prior - z)[depth_mask_flat]
+            b_vec += lambda1 * depth_confidence * z_prior # dont need mask because z_prior has been set to 0 at mask
+            depth_diff = depth_confidence[depth_mask_flat]*(z_prior - z)[depth_mask_flat]
             offset = cp.mean(depth_diff)
             z = z + offset
             
         D = csr_matrix((1 / cp.clip(diagonal_data_term, 1e-5, None), pixel_idx_flat, pixel_idx_flat_indptr),
                        shape=(num_normals, num_normals))  # Jacobi preconditioner.
-        z, _ = cg(A_mat, b_vec, x0=z, M=D, maxiter=cg_max_iter, tol=cg_tol)
+        t = time.time()
+        z, cg_iters = cg(A_mat, b_vec, x0=z, M=D, maxiter=cg_max_iter, tol=cg_tol)
+        # if i < 3:
+        #     print("OPTIM:", time.time()-t, cg_iters)
         del A_mat, b_vec, wu, wv
 
         # Update weights
         wu = sigmoid((A2.dot(z)) ** 2 - (A1.dot(z)) ** 2, k)  # top
         wv = sigmoid((A4.dot(z)) ** 2 - (A3.dot(z)) ** 2, k)  # right
+        wu_plus = wu*normals_confidence
+        wu_minus = (1-wu)*normals_confidence
+        wv_plus = wv*normals_confidence
+        wv_minus = (1-wv)*normals_confidence
 
         # Check for convergence
         energy_old = energy
-        energy = cp.sum(wu * (A1.dot(z) + nx) ** 2) + \
-                 cp.sum((1 - wu) * (A2.dot(z) + nx) ** 2) + \
-                 cp.sum(wv * (A3.dot(z) + ny) ** 2) + \
-                 cp.sum((1 - wv) * (A4.dot(z) + ny) ** 2)
+        energy_matrix = (wu_plus * (A1.dot(z) + nx) ** 2) + \
+                 (wu_minus * (A2.dot(z) + nx) ** 2) + \
+                 (wv_plus * (A3.dot(z) + ny) ** 2) + \
+                 (wv_minus * (A4.dot(z) + ny) ** 2)
+        depth_energy_matrix = lambda1 * depth_confidence * (z_prior - z)**2
+        energy = cp.sum(energy_matrix+depth_energy_matrix)
 
         energy_list.append(energy)
         relative_energy = cp.abs(energy - energy_old) / energy_old
-        pbar.set_description(
+        if verbose>1: pbar.set_description(
             f"step {i + 1}/{max_iter} energy: {energy:.3e}"
             f" relative energy: {relative_energy:.3e}")
         if relative_energy < tol:
             break
+
     del A1, A2, A3, A4, nx, ny
     toc = time.time()
 
-    print(f"Total time: {toc - tic:.3f} sec")
+    if verbose: 
+        print(f"Total time: {toc - tic:.3f} sec")
+        print(f"Energy: {energy_list[0]} --> {energy_list[-1]}.  Steps: {i}")
     depth_map = cp.ones_like(normal_mask, float) * cp.nan
     depth_map[normal_mask] = z
 
@@ -874,7 +659,6 @@ def bilateral_normal_integration_uncertainty_legacy(normal_map,
     facets = cp.asnumpy(construct_facets_from(normal_mask))
     if nz.mean() > 0:
         facets = facets[:, [0, 1, 4, 3, 2]]
-    surface = pv.PolyData(vertices, facets)
 
     # In the main paper, wu indicates the horizontal direction; wv indicates the vertical direction
     wu_map = cp.ones_like(normal_mask) * cp.nan
@@ -886,9 +670,288 @@ def bilateral_normal_integration_uncertainty_legacy(normal_map,
     depth_map = cp.asnumpy(depth_map)
     wu_map = cp.asnumpy(wu_map)
     wv_map = cp.asnumpy(wv_map)
-    
-    return depth_map, surface, wu_map, wv_map, energy_list
+    E = cp.ones_like(normal_mask, float) * cp.nan
+    E[normal_mask] = energy_matrix
+    E = cp.asnumpy(E)
+    return depth_map, wu_map, wv_map, energy_list, E
 
+def bilateral_normal_integration_uncertainty(normal_map,
+                                 normal_mask, normals_confidence=None,
+                                 k=2,
+                                 lambda1=0,
+                                 depth_map=None,
+                                 depth_mask=None,
+                                 depth_confidence=None,
+                                 depth_init=None,
+                                 K=None,
+                                 step_size=1,
+                                 max_iter=150,
+                                 tol=1e-4,
+                                 cg_max_iter=5000,
+                                 cg_tol=1e-3,
+                                 verbose=2):
+    normal_map = cp.asarray(normal_map)
+    normal_mask = cp.asarray(normal_mask)
+    if depth_map is not None:
+        depth_map = cp.asarray(depth_map)
+        depth_mask = cp.asarray(depth_mask)
+    if normals_confidence is not None:
+        normals_confidence = cp.asarray(normals_confidence)
+    if depth_confidence is not None:
+        depth_confidence = cp.asarray(depth_confidence)
+
+    num_normals = cp.sum(normal_mask).item()
+    projection = "orthographic" if K is None else "perspective"
+    if verbose >1: print(f"Running bilateral normal integration with k={k} in the {projection} case. \n"
+          f"The number of normal vectors is {num_normals}.")
+    # transfer the normal map from the normal coordinates to the camera coordinates
+    nx = normal_map[normal_mask, 1]
+    ny = normal_map[normal_mask, 0]
+    nz = - normal_map[normal_mask, 2]
+    del normal_map
+
+    if K is not None:  # perspective
+        H, W = normal_mask.shape
+
+        yy, xx = cp.meshgrid(cp.arange(W), cp.arange(H))
+        xx = cp.flip(xx, axis=0)
+
+        cx = K[0, 2]
+        cy = K[1, 2]
+        fx = K[0, 0]
+        fy = K[1, 1]
+
+        uu = xx[normal_mask] - cx
+        vv = yy[normal_mask] - cy
+
+        nz_u = uu * nx + vv * ny + fx * nz
+        nz_v = uu * nx + vv * ny + fy * nz
+        del xx, yy, uu, vv
+    else:  # orthographic
+        nz_u = nz.copy()
+        nz_v = nz.copy()
+
+    # right, left, top, bottom
+    A3, A4, A1, A2 = generate_dx_dy(normal_mask, nz_horizontal=nz_v, nz_vertical=nz_u, step_size=step_size)
+
+    pixel_idx = cp.zeros_like(normal_mask, dtype=int)
+    pixel_idx[normal_mask] = cp.arange(num_normals)
+    pixel_idx_flat = cp.arange(num_normals)
+    pixel_idx_flat_indptr = cp.arange(num_normals + 1)
+
+    has_left_mask = cp.logical_and(move_right(normal_mask), normal_mask)
+    has_left_mask_left = move_left(has_left_mask)
+    has_right_mask = cp.logical_and(move_left(normal_mask), normal_mask)
+    has_right_mask_right = move_right(has_right_mask)
+    has_bottom_mask = cp.logical_and(move_top(normal_mask), normal_mask)
+    has_bottom_mask_bottom = move_bottom(has_bottom_mask)
+    has_top_mask = cp.logical_and(move_bottom(normal_mask), normal_mask)
+    has_top_mask_top = move_top(has_top_mask)
+
+    has_left_mask_flat = has_left_mask[normal_mask]
+    has_right_mask_flat = has_right_mask[normal_mask]
+    has_bottom_mask_flat = has_bottom_mask[normal_mask]
+    has_top_mask_flat = has_top_mask[normal_mask]
+
+    has_left_mask_left_flat = has_left_mask_left[normal_mask]
+    has_right_mask_right_flat = has_right_mask_right[normal_mask]
+    has_bottom_mask_bottom_flat = has_bottom_mask_bottom[normal_mask]
+    has_top_mask_top_flat = has_top_mask_top[normal_mask]
+
+    nz_left_square = nz_v[has_left_mask_flat] ** 2
+    nz_right_square = nz_v[has_right_mask_flat] ** 2
+    nz_top_square = nz_u[has_top_mask_flat] ** 2
+    nz_bottom_square = nz_u[has_bottom_mask_flat] ** 2
+
+    pixel_idx_left_center = pixel_idx[has_left_mask]
+    pixel_idx_right_right = pixel_idx[has_right_mask_right]
+    pixel_idx_top_center = pixel_idx[has_top_mask]
+    pixel_idx_bottom_bottom = pixel_idx[has_bottom_mask_bottom]
+
+    pixel_idx_left_left_indptr = cp.concatenate([cp.array([0]), cp.cumsum(has_left_mask_left_flat)])
+    pixel_idx_right_center_indptr = cp.concatenate([cp.array([0]), cp.cumsum(has_right_mask_flat)])
+    pixel_idx_top_top_indptr = cp.concatenate([cp.array([0]), cp.cumsum(has_top_mask_top_flat)])
+    pixel_idx_bottom_center_indptr = cp.concatenate([cp.array([0]), cp.cumsum(has_bottom_mask_flat)])
+
+    # initialization
+    if depth_init is None:
+        z = cp.zeros(num_normals, float)
+        wu = 0.5 * cp.ones(num_normals, float)
+        wv = 0.5 * cp.ones(num_normals, float)
+    else:
+        z = cp.log(cp.asarray(depth_init)[normal_mask])
+        wu = sigmoid((A2.dot(z)) ** 2 - (A1.dot(z)) ** 2, k)  # top
+        wv = sigmoid((A4.dot(z)) ** 2 - (A3.dot(z)) ** 2, k)  # right
+    # wu_minus = (1-wu)*normals_confidence
+    
+    
+
+    
+    tic = time.time()
+    
+
+    # if depth_map is not None:
+    #     if depth_confidence is None:
+    #         depth_confidence = 0.5*cp.ones_like(depth_mask, float)
+    #     if normals_confidence is None:
+    #         normals_confidence = 0.5*cp.ones_like(normal_mask, float)
+    #     depth_confidence = depth_confidence / normals_confidence
+    #     depth_confidence =depth_confidence[normal_mask]
+        
+    #     depth_mask_flat = depth_mask[normal_mask].astype(bool)  # shape: (num_normals,)
+    #     z_prior = cp.log(depth_map)[normal_mask] if K is not None else depth_map[normal_mask]  # shape: (num_normals,)
+    #     z_prior[~depth_mask_flat] = 0
+    if normals_confidence is None:
+        normals_confidence = cp.ones_like(normal_mask, float)
+    normals_confidence = normals_confidence[normal_mask]
+
+    if depth_map is not None:
+        if depth_confidence is None:
+            depth_confidence = 0.5*cp.ones_like(depth_mask, float)
+        
+        depth_confidence =depth_confidence[normal_mask]
+        
+        depth_mask_flat = depth_mask[normal_mask].astype(bool)  # shape: (num_normals,)
+        z_prior = cp.log(depth_map)[normal_mask] if K is not None else depth_map[normal_mask]  # shape: (num_normals,)
+        z_prior[~depth_mask_flat] = 0
+        
+    wu_plus = wu*normals_confidence
+    wu_minus = (1-wu)*normals_confidence
+    wv_plus = wv*normals_confidence
+    wv_minus = (1-wv)*normals_confidence
+    energy = cp.sum(wu_plus * (A1.dot(z) + nx) ** 2) + \
+             cp.sum(wu_minus * (A2.dot(z) + nx) ** 2) + \
+             cp.sum(wv_plus * (A3.dot(z) + ny) ** 2) + \
+             cp.sum(wv_minus * (A4.dot(z) + ny) ** 2)
+    
+    depth_energy = cp.sum(lambda1 * depth_confidence * (z_prior - z)**2)
+             
+
+    energy_list = [energy+depth_energy]
+
+    pbar = tqdm(range(max_iter)) if verbose >1 else range(max_iter)
+    for i in pbar:
+        ################################################################################################################
+        # I am manually computing A_mat = A.T @ W @ A here. It saves 2/3 time compared to the simpliest way A.T @ W @ A.
+        # A.T @ W @ A can take more time than you think when the normal map become larger.
+        # The diaganol matrix W=diag([wu, 1-wu, wv, 1-wv]) needs not be explicited defined in this case.
+        # 
+        # data_term_top = wu[has_top_mask_flat] * nz_top_square
+        # data_term_bottom = (1 - wu[has_bottom_mask_flat]) * nz_bottom_square
+        # data_term_left = (1 - wv[has_left_mask_flat]) * nz_left_square
+        # data_term_right = wv[has_right_mask_flat] * nz_right_square
+        
+        data_term_top = wu_plus[has_top_mask_flat] * nz_top_square
+        data_term_bottom = wu_minus[has_bottom_mask_flat] * nz_bottom_square
+        data_term_left = wv_minus[has_left_mask_flat] * nz_left_square
+        data_term_right = wv_plus[has_right_mask_flat] * nz_right_square
+
+        diagonal_data_term = cp.zeros(num_normals)
+        diagonal_data_term[has_left_mask_flat] += data_term_left
+        diagonal_data_term[has_left_mask_left_flat] += data_term_left
+        diagonal_data_term[has_right_mask_flat] += data_term_right
+        diagonal_data_term[has_right_mask_right_flat] += data_term_right
+        diagonal_data_term[has_top_mask_flat] += data_term_top
+        diagonal_data_term[has_top_mask_top_flat] += data_term_top
+        diagonal_data_term[has_bottom_mask_flat] += data_term_bottom
+        diagonal_data_term[has_bottom_mask_bottom_flat] += data_term_bottom
+        if depth_map is not None:
+            diagonal_data_term[depth_mask_flat] += lambda1 * depth_confidence[depth_mask_flat]
+
+        A_mat_d = csr_matrix((diagonal_data_term, pixel_idx_flat, pixel_idx_flat_indptr),
+                             shape=(num_normals, num_normals))
+
+        A_mat_left_odu = csr_matrix((-data_term_left, pixel_idx_left_center, pixel_idx_left_left_indptr),
+                                    shape=(num_normals, num_normals))
+        A_mat_right_odu = csr_matrix((-data_term_right, pixel_idx_right_right, pixel_idx_right_center_indptr),
+                                     shape=(num_normals, num_normals))
+        A_mat_top_odu = csr_matrix((-data_term_top, pixel_idx_top_center, pixel_idx_top_top_indptr),
+                                   shape=(num_normals, num_normals))
+        A_mat_bottom_odu = csr_matrix((-data_term_bottom, pixel_idx_bottom_bottom, pixel_idx_bottom_center_indptr),
+                                      shape=(num_normals, num_normals))
+
+        A_mat_odu = A_mat_top_odu + A_mat_bottom_odu + A_mat_right_odu + A_mat_left_odu
+        A_mat = A_mat_d + A_mat_odu + A_mat_odu.T  # diagnol + upper triangle + lower triangle matrix
+        ################################################################################################################
+
+        b_vec = A1.T @ (wu_plus * (-nx)) \
+                + A2.T @ (wu_minus * (-nx)) \
+                + A3.T @ (wv_plus * (-ny)) \
+                + A4.T @ (wv_minus * (-ny))
+
+        if depth_map is not None:
+            b_vec += lambda1 * depth_confidence * z_prior # dont need mask because z_prior has been set to 0 at mask
+            depth_diff = depth_confidence[depth_mask_flat]*(z_prior - z)[depth_mask_flat]
+            offset = cp.mean(depth_diff)
+            z = z + offset
+            
+        D = csr_matrix((1 / cp.clip(diagonal_data_term, 1e-5, None), pixel_idx_flat, pixel_idx_flat_indptr),
+                       shape=(num_normals, num_normals))  # Jacobi preconditioner.
+        t = time.time()
+        z, cg_iters = cg(A_mat, b_vec, x0=z, M=D, maxiter=cg_max_iter, tol=cg_tol)
+        # if i < 3:
+        #     print("OPTIM:", time.time()-t, cg_iters)
+        del A_mat, b_vec, wu, wv
+
+        # Update weights
+        wu = sigmoid((A2.dot(z)) ** 2 - (A1.dot(z)) ** 2, k)  # top
+        wv = sigmoid((A4.dot(z)) ** 2 - (A3.dot(z)) ** 2, k)  # right
+        wu_plus = wu*normals_confidence
+        wu_minus = (1-wu)*normals_confidence
+        wv_plus = wv*normals_confidence
+        wv_minus = (1-wv)*normals_confidence
+
+        # Check for convergence
+        energy_old = energy
+        energy_matrix = (wu_plus * (A1.dot(z) + nx) ** 2) + \
+                 (wu_minus * (A2.dot(z) + nx) ** 2) + \
+                 (wv_plus * (A3.dot(z) + ny) ** 2) + \
+                 (wv_minus * (A4.dot(z) + ny) ** 2)
+        depth_energy = cp.sum(lambda1 * depth_confidence * (z_prior - z)**2)
+        
+        energy = cp.sum(energy_matrix) + depth_energy
+
+        energy_list.append(energy)
+        relative_energy = cp.abs(energy - energy_old) / energy_old
+        if verbose>1: pbar.set_description(
+            f"step {i + 1}/{max_iter} energy: {energy:.3e}"
+            f" relative energy: {relative_energy:.3e}")
+        if relative_energy < tol:
+            break
+
+    del A1, A2, A3, A4, nx, ny
+    toc = time.time()
+
+    if verbose: 
+        print(f"Total time: {toc - tic:.3f} sec")
+        print(f"Energy: {energy_list[0]} --> {energy_list[-1]}.  Steps: {i}")
+    depth_map = cp.ones_like(normal_mask, float) * cp.nan
+    depth_map[normal_mask] = z
+
+    if K is not None:  # perspective
+        depth_map = cp.exp(depth_map)
+        vertices = cp.asnumpy(map_depth_map_to_point_clouds(depth_map, normal_mask, K=K))
+    else:  # orthographic
+        vertices = cp.asnumpy(map_depth_map_to_point_clouds(depth_map, normal_mask, K=None, step_size=step_size))
+
+    facets = cp.asnumpy(construct_facets_from(normal_mask))
+    if nz.mean() > 0:
+        facets = facets[:, [0, 1, 4, 3, 2]]
+
+    # In the main paper, wu indicates the horizontal direction; wv indicates the vertical direction
+    wu_map = cp.ones_like(normal_mask) * cp.nan
+    wu_map[normal_mask] = wv
+
+    wv_map = cp.ones_like(normal_mask) * cp.nan
+    wv_map[normal_mask] = wu
+    
+    depth_map = cp.asnumpy(depth_map)
+    wu_map = cp.asnumpy(wu_map)
+    wv_map = cp.asnumpy(wv_map)
+    E = cp.ones_like(normal_mask, float) * cp.nan
+    E[normal_mask] = energy_matrix
+    E = cp.asnumpy(E)
+    return depth_map, wu_map, wv_map, energy_list, E
 
 if __name__ == '__main__':
     import cv2

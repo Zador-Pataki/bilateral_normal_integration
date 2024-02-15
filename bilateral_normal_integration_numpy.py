@@ -289,7 +289,16 @@ def bilateral_normal_integration(normal_map,
         # Update the weight matrices
         wu = sigmoid((A2 @ z) ** 2 - (A1 @ z) ** 2, k)
         wv = sigmoid((A4 @ z) ** 2 - (A3 @ z) ** 2, k)
+            
         W = spdiags(np.concatenate((wu, 1-wu, wv, 1-wv)), 0, 4*num_normals, 4*num_normals, format="csr")
+        import matplotlib.pyplot as plt
+        
+        plt.figure(figsize=(10, 10))
+        plt.spy(A1[-10000:, -10000:].tocoo(), markersize=1)
+        plt.title('Sparsity Pattern of the Matrix')
+        plt.xlabel('Column Index')
+        plt.ylabel('Row Index')
+        plt.savefig("W.png")
 
         # Check for convergence
         energy_old = energy
